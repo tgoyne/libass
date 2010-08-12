@@ -124,20 +124,22 @@ char parse_bool(char *str)
 
 int parse_ycbcr_matrix(char *str)
 {
+    char buffer[16];
+    char *end;
+    size_t n;
     while (*str == ' ' || *str == '\t')
         str++;
     if (*str == '\0')
         return YCBCR_DEFAULT;
 
-    char *end = str + strlen(str);
+    end = str + strlen(str);
     while (end[-1] == ' ' || end[-1] == '\t')
         end--;
 
     // Trim a local copy of the input that we know is safe to
     // modify. The buffer is larger than any valid string + NUL,
     // so we can simply chop off the rest of the input.
-    char buffer[16];
-    size_t n = FFMIN(end - str, sizeof buffer - 1);
+    n = FFMIN(end - str, sizeof buffer - 1);
     strncpy(buffer, str, n);
     buffer[n] = '\0';
 

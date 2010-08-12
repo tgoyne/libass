@@ -343,11 +343,6 @@ static ASS_Image **
 render_glyph(ASS_Renderer *render_priv, Bitmap *bm, int dst_x, int dst_y,
              uint32_t color, uint32_t color2, int brk, ASS_Image **tail, unsigned int type)
 {
-    // Inverse clipping in use?
-    if (render_priv->state.clip_mode)
-        return render_glyph_i(render_priv, bm, dst_x, dst_y, color, color2,
-                              brk, tail, type);
-
     // brk is relative to dst_x
     // color = color left of brk
     // color2 = color right of brk
@@ -355,6 +350,11 @@ render_glyph(ASS_Renderer *render_priv, Bitmap *bm, int dst_x, int dst_y,
     int clip_x0, clip_y0, clip_x1, clip_y1;
     int tmp;
     ASS_Image *img;
+
+    // Inverse clipping in use?
+    if (render_priv->state.clip_mode)
+        return render_glyph_i(render_priv, bm, dst_x, dst_y, color, color2,
+                              brk, tail, type);
 
     dst_x += bm->left;
     dst_y += bm->top;
@@ -577,8 +577,8 @@ static void blend_vector_clip(ASS_Renderer *render_priv,
         if (render_priv->settings.left_margin != 0 ||
             render_priv->settings.top_margin != 0) {
             FT_Vector trans = {
-                .x = int_to_d6(render_priv->settings.left_margin),
-                .y = -int_to_d6(render_priv->settings.top_margin),
+                int_to_d6(render_priv->settings.left_margin),
+                -int_to_d6(render_priv->settings.top_margin),
             };
             FT_Outline_Translate(outline, trans.x, trans.y);
         }
@@ -951,19 +951,21 @@ static void draw_opaque_box(ASS_Renderer *render_priv, GlyphInfo *info,
     desc *= scale_y;
     desc += asc * (scale_y - 1.0);
 
-    FT_Vector points[4] = {
-        { .x = -sx,         .y = asc + sy },
-        { .x = adv + sx,    .y = asc + sy },
-        { .x = adv + sx,    .y = -desc - sy },
-        { .x = -sx,         .y = -desc - sy },
-    };
+    {
+        FT_Vector points[4] = {
+            { -sx,         asc + sy },
+            { adv + sx,    asc + sy },
+            { adv + sx,    -desc - sy },
+            { -sx,         -desc - sy },
+        };
 
-    FT_Outline_New(render_priv->ftlibrary, 4, 1, ol);
+        FT_Outline_New(render_priv->ftlibrary, 4, 1, ol);
 
-    ol->n_points = ol->n_contours = 0;
-    for (i = 0; i < 4; i++) {
-        ol->points[ol->n_points] = points[i];
-        ol->tags[ol->n_points++] = 1;
+        ol->n_points = ol->n_contours = 0;
+        for (i = 0; i < 4; i++) {
+            ol->points[ol->n_points] = points[i];
+            ol->tags[ol->n_points++] = 1;
+        }
     }
     ol->contours[ol->n_contours++] = ol->n_points - 1;
 }
@@ -1097,6 +1099,8 @@ get_outline_glyph(ASS_Renderer *priv, GlyphInfo *info)
             v.desc = drawing->desc;
             key.u.drawing.text = strdup(drawing->text);
         } else {
+            FT_Glyph glyph;
+
             // arbitrary, not too small to prevent grid fitting rounding effects
             // XXX: this is a rather crude hack
             const double ft_size = 256.0;
@@ -1105,7 +1109,7 @@ get_outline_glyph(ASS_Renderer *priv, GlyphInfo *info)
                 info->scale_x * info->font_size / ft_size,
                 info->scale_y * info->font_size / ft_size,
                 NULL);
-            FT_Glyph glyph =
+            glyph =
                 ass_font_get_glyph(priv->fontconfig_priv, info->font,
                         info->symbol, info->face_index, info->glyph_index,
                         priv->settings.hinting, info->flags);
@@ -1273,6 +1277,9 @@ get_bitmap_glyph(ASS_Renderer *render_priv, GlyphInfo *info)
         FT_Outline *outline, *border;
         double scale_x = render_priv->font_scale_x;
 
+        // PAR correction scaling
+        FT_Matrix m = { double_to_d16(scale_x), 0, 0, double_to_d16(1.0) };
+
         hash_val.bm = hash_val.bm_o = hash_val.bm_s = 0;
 
         outline_copy(render_priv->ftlibrary, info->outline, &outline);
@@ -1288,10 +1295,6 @@ get_bitmap_glyph(ASS_Renderer *render_priv, GlyphInfo *info)
         transform_3d(shift, outline, border,
                 info->frx, info->fry, info->frz, fax_scaled,
                 fay_scaled, render_priv->font_scale, info->asc);
-
-        // PAR correction scaling
-        FT_Matrix m = { double_to_d16(scale_x), 0,
-            0, double_to_d16(1.0) };
 
         // subpixel shift
         if (outline) {
@@ -1582,9 +1585,10 @@ wrap_lines_smart(ASS_Renderer *render_priv, double max_text_width)
     for (i = 0; i < text_info->length; ++i) {
         cur = text_info->glyphs + i;
         if (cur->linebreak) {
+            double height;
             while (i < text_info->length && cur->skip && cur->symbol != '\n')
                 cur = text_info->glyphs + ++i;
-            double height =
+            height =
                 text_info->lines[cur_line - 1].desc +
                 text_info->lines[cur_line].asc;
             text_info->lines[cur_line - 1].len = i -
@@ -1695,6 +1699,8 @@ ass_render_event(ASS_Renderer *render_priv, ASS_Event *event,
     TextInfo *text_info = &render_priv->text_info;
     GlyphInfo *glyphs = render_priv->text_info.glyphs;
     ASS_Drawing *drawing;
+    double max_text_width;
+    int in_tag;
 
     if (event->Style >= render_priv->track->n_styles) {
         ass_msg(render_priv->library, MSGL_WARN, "No style found");
@@ -1711,7 +1717,7 @@ ass_render_event(ASS_Renderer *render_priv, ASS_Event *event,
     text_info->length = 0;
     p = event->Text;
 
-    int in_tag = 0;
+    in_tag = 0;
 
     // Event parsing.
     while (1) {
@@ -1911,7 +1917,7 @@ ass_render_event(ASS_Renderer *render_priv, ASS_Event *event,
         (event->MarginV) ? event->MarginV : render_priv->state.style->MarginV;
 
     // calculate max length of a line
-    double max_text_width =
+    max_text_width =
         x2scr(render_priv, render_priv->track->PlayResX - MarginR) -
         x2scr(render_priv, MarginL);
 
@@ -1928,16 +1934,17 @@ ass_render_event(ASS_Renderer *render_priv, ASS_Event *event,
     }
 
     // Reorder text into visual order
-    FriBidiStrIndex *cmap = ass_shaper_reorder(render_priv->shaper, text_info);
+    {
+        FriBidiStrIndex *cmap = ass_shaper_reorder(render_priv->shaper, text_info);
+        int lineno = 1;
 
     // Reposition according to the map
     pen.x = 0;
     pen.y = 0;
-    int lineno = 1;
     for (i = 0; i < text_info->length; i++) {
+        FT_Vector cluster_pen;
         GlyphInfo *info = glyphs + cmap[i];
         if (glyphs[i].linebreak) {
-            pen.y -= (info->fay / info->scale_x * info->scale_y) * pen.x;
             pen.x = 0;
             pen.y += double_to_d6(text_info->lines[lineno-1].desc);
             pen.y += double_to_d6(text_info->lines[lineno].asc);
@@ -1945,7 +1952,7 @@ ass_render_event(ASS_Renderer *render_priv, ASS_Event *event,
             lineno++;
         }
         if (info->skip) continue;
-        FT_Vector cluster_pen = pen;
+        cluster_pen = pen;
         while (info) {
             info->pos.x = info->offset.x + cluster_pen.x;
             info->pos.y = info->offset.y + cluster_pen.y;
@@ -1958,17 +1965,19 @@ ass_render_event(ASS_Renderer *render_priv, ASS_Event *event,
         pen.y += info->cluster_advance.y;
     }
 
+    }
+
     // align lines
     if (render_priv->state.evt_type != EVENT_HSCROLL) {
-        last_break = -1;
         double width = 0;
+        last_break = -1;
         for (i = 0; i <= text_info->length; ++i) {   // (text_info->length + 1) is the end of the last line
             if ((i == text_info->length) || glyphs[i].linebreak) {
+                double shift = 0;
                 // remove letter spacing (which is included in cluster_advance)
                 if (i > 0)
                     width -= render_priv->state.hspacing * render_priv->font_scale *
                         glyphs[i-1].scale_x;
-                double shift = 0;
                 if (halign == HALIGN_LEFT) {    // left aligned, no action
                     shift = 0;
                 } else if (halign == HALIGN_RIGHT) {    // right aligned
@@ -2141,21 +2150,23 @@ ass_render_event(ASS_Renderer *render_priv, ASS_Event *event,
     }
 
     // convert glyphs to bitmaps
-    int left = render_priv->settings.left_margin;
-    device_x = (device_x - left) * render_priv->font_scale_x + left;
-    for (i = 0; i < text_info->length; ++i) {
-        GlyphInfo *info = glyphs + i;
-        while (info) {
-            OutlineBitmapHashKey *key = &info->hash_key.u.outline;
-            info->pos.x *= render_priv->font_scale_x;
-            key->advance.x =
-                double_to_d6(device_x - (int) device_x +
-                        d6_to_double(info->pos.x & SUBPIXEL_MASK)) & ~SUBPIXEL_ACCURACY;
-            key->advance.y =
-                double_to_d6(device_y - (int) device_y +
-                        d6_to_double(info->pos.y & SUBPIXEL_MASK)) & ~SUBPIXEL_ACCURACY;
-            get_bitmap_glyph(render_priv, info);
-            info = info->next;
+    {
+        int left = render_priv->settings.left_margin;
+        device_x = (device_x - left) * render_priv->font_scale_x + left;
+        for (i = 0; i < text_info->length; ++i) {
+            GlyphInfo *info = glyphs + i;
+            while (info) {
+                OutlineBitmapHashKey *key = &info->hash_key.u.outline;
+                info->pos.x *= render_priv->font_scale_x;
+                key->advance.x =
+                    double_to_d6(device_x - (int) device_x +
+                            d6_to_double(info->pos.x & SUBPIXEL_MASK)) & ~SUBPIXEL_ACCURACY;
+                key->advance.y =
+                    double_to_d6(device_y - (int) device_y +
+                            d6_to_double(info->pos.y & SUBPIXEL_MASK)) & ~SUBPIXEL_ACCURACY;
+                get_bitmap_glyph(render_priv, info);
+                info = info->next;
+            }
         }
     }
 
@@ -2258,6 +2269,7 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
     ass_shaper_set_level(render_priv->shaper, render_priv->settings.shaper);
 
     // PAR correction
+    {
     double par = render_priv->settings.par;
     if (par == 0.) {
         if (settings_priv->frame_width && settings_priv->frame_height &&
@@ -2271,6 +2283,7 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
             par = 1.0;
     }
     render_priv->font_scale_x = par;
+    }
 
     render_priv->prev_images_root = render_priv->images_root;
     render_priv->images_root = 0;
