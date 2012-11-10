@@ -26,9 +26,12 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <inttypes.h>
 #include <ctype.h>
+
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
 
 #ifdef CONFIG_ICONV
 #include <iconv.h>
